@@ -11,6 +11,10 @@ use tracing::{debug, warn};
 use crate::codex_wire::providers::zai::{custom_tool_names, extract_custom_input};
 use crate::codex_wire::schema::responses_wire::ChatRequest;
 use crate::codex_wire::schema::sse::{
+    CustomToolCallInputDeltaData, CustomToolCallInputDoneData, FunctionCallArgumentsDeltaData,
+    FunctionCallArgumentsDoneData,
+};
+use crate::codex_wire::schema::sse::{
     CustomToolCallItem, FailedResponseObject, FunctionCallItem, LocalShellCallItem, MessageItem,
     OutputContentPart, OutputItem, ResponseCompletedData, ResponseCreatedData, ResponseError,
     ResponseEvent, ResponseFailedData, ResponseObject, ResponseOutputItemAddedData,
@@ -169,7 +173,38 @@ pub fn stream_responses_sse(
                             entry.name.push_str(&name_part);
                         }
                         if let Some(args_part) = fn_delta.arguments {
-                            entry.arguments.push_str(&args_part.to_json_fragment());
+                            let fragment = args_part.to_json_fragment();
+                            if !fragment.is_empty() {
+                                entry.arguments.push_str(&fragment);
+                                // Stream the arguments fragment so clients can
+                                // incrementally parse tool-call fields (e.g. a
+                                // spawn_agent `task_name`) before the call closes.
+                                if custom_names.contains(&entry.name) {
+                                    yield Ok(encode_event(
+                                        &mut seq_num,
+                                        "response.custom_tool_call_input.delta",
+                                        CustomToolCallInputDeltaData {
+                                            response_id: resp_id.clone(),
+                                            item_id: entry.item_id(),
+                                            output_index: entry.output_index as i64,
+                                            call_id: entry.call_id.clone(),
+                                            input_delta: fragment.clone(),
+                                        },
+                                    ));
+                                } else {
+                                    yield Ok(encode_event(
+                                        &mut seq_num,
+                                        "response.function_call_arguments.delta",
+                                        FunctionCallArgumentsDeltaData {
+                                            response_id: resp_id.clone(),
+                                            item_id: entry.item_id(),
+                                            output_index: entry.output_index as i64,
+                                            call_id: entry.call_id.clone(),
+                                            delta: fragment.clone(),
+                                        },
+                                    ));
+                                }
+                            }
                         }
                     }
 
@@ -250,17 +285,70 @@ pub fn stream_responses_sse(
         }
 
         // Finalize output items in output_index order.
-        let mut items_to_close: Vec<(usize, OutputItem)> = Vec::new();
+        // `PendingClose` lets the finalization loop emit the matching terminal
+        // argument/input `.done` event for tool calls alongside `output_item.done`.
+        enum PendingClose {
+            Message(OutputItem),
+            Tool { item: OutputItem, call_id: String },
+        }
+        let mut items_to_close: Vec<(usize, PendingClose)> = Vec::new();
         if let Some(msg) = message {
-            items_to_close.push((msg.output_index as usize, msg.item));
+            items_to_close.push((msg.output_index as usize, PendingClose::Message(msg.item)));
         }
         for tc in tool_calls.values() {
-            items_to_close.push((tc.output_index, finalize_tool_call(tc, &req, &custom_names)));
+            items_to_close.push((
+                tc.output_index,
+                PendingClose::Tool {
+                    item: finalize_tool_call(tc, &req, &custom_names),
+                    call_id: tc.call_id.clone(),
+                },
+            ));
         }
-        items_to_close.sort_by_key(|(idx, _)| *idx);
+       items_to_close.sort_by_key(|(idx, _)| *idx);
 
         let mut final_output: Vec<OutputItem> = Vec::new();
-        for (out_idx, mut item) in items_to_close {
+       for (out_idx, pending) in items_to_close {
+            let mut item = match pending {
+                PendingClose::Message(item) => item,
+                PendingClose::Tool { item, call_id } => {
+                    let item_id = format!("fc_{call_id}");
+                    if matches!(item, OutputItem::CustomToolCall(_)) {
+                        let input = match &item {
+                            OutputItem::CustomToolCall(c) => c.input.clone(),
+                            _ => String::new(),
+                        };
+                        yield Ok(encode_event(
+                            &mut seq_num,
+                            "response.custom_tool_call_input.done",
+                            CustomToolCallInputDoneData {
+                                response_id: resp_id.clone(),
+                                item_id,
+                                output_index: out_idx as i64,
+                                call_id,
+                                input,
+                            },
+                        ));
+                    } else {
+                        let arguments = match &item {
+                            OutputItem::FunctionCall(c) => c.arguments.clone(),
+                            OutputItem::LocalShellCall(c) => c.arguments.clone(),
+                            _ => String::new(),
+                        };
+                        yield Ok(encode_event(
+                            &mut seq_num,
+                            "response.function_call_arguments.done",
+                            FunctionCallArgumentsDoneData {
+                                response_id: resp_id.clone(),
+                                item_id,
+                                output_index: out_idx as i64,
+                                call_id,
+                                arguments,
+                            },
+                        ));
+                    }
+                    item
+                }
+            };
             set_item_status(&mut item, "completed");
             yield Ok(encode_event(
                 &mut seq_num,
@@ -318,6 +406,13 @@ struct ToolCallState {
     name: String,
     arguments: String,
     item: OutputItem,
+}
+impl ToolCallState {
+    /// Stable item id surfaced in streaming events. For function/custom calls
+    /// Codex keys incremental argument deltas on this id.
+    fn item_id(&self) -> String {
+        format!("fc_{}", self.call_id)
+    }
 }
 
 fn finalize_tool_call(
@@ -716,5 +811,97 @@ mod tests {
         assert!(body.contains("\"name\":\"apply_patch\""));
         assert!(body.contains("*** Begin Patch"));
         assert!(body.contains("response.completed"));
+        // Custom tool calls must stream their freeform input so Codex can apply
+        // patches incrementally like a native tool.
+        assert!(
+            body.contains("response.custom_tool_call_input.delta"),
+            "missing custom_tool_call_input.delta in: {body}"
+        );
+        assert!(
+            body.contains("response.custom_tool_call_input.done"),
+            "missing custom_tool_call_input.done in: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_emits_function_call_arguments_delta_and_done() {
+        use crate::codex_wire::schema::responses_wire::Tool;
+
+        let request = ChatRequest {
+            model: "glm-5.2".into(),
+            messages: Vec::new(),
+            tools: vec![Tool {
+                tool_type: "function".into(),
+                function: Some(crate::codex_wire::schema::responses_wire::FunctionDef {
+                    name: "spawn_agent".into(),
+                    description: None,
+                    parameters: None,
+                }),
+                name: None,
+                namespace: Some("multi_agent".into()),
+                description: None,
+                parameters: None,
+                strict: None,
+                web_search: None,
+                tools: Vec::new(),
+            }],
+            tool_choice: Some("auto".into()),
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            stream: true,
+            store: false,
+            metadata: Default::default(),
+            previous_response_id: None,
+            include: Vec::new(),
+        };
+
+        // Stream the arguments in two fragments so we can assert both incremental
+        // deltas and the final `.done` payload carry the task_name.
+        let upstream = futures::stream::iter(vec![
+            Ok(Bytes::from(
+                r#"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_7","type":"function","function":{"name":"spawn_agent","arguments":"{\"task_name\":\"poet\","}}]}}]}"#,
+            )),
+            Ok(Bytes::from("\n\n")),
+            Ok(Bytes::from(
+                r#"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"message\":\"hi\"}"}}]}}]}"#,
+            )),
+            Ok(Bytes::from("\n\n")),
+            Ok(Bytes::from("data: [DONE]\n")),
+        ]);
+
+        let chunks = stream_responses_sse(upstream, "glm-5.2", 123, &request, 1)
+            .collect::<Vec<_>>()
+            .await;
+        let body = chunks
+            .into_iter()
+            .map(|chunk| String::from_utf8(chunk.unwrap().to_vec()).unwrap())
+            .collect::<String>();
+
+        // The incremental delta stream is what lets clients surface fields like
+        // task_name before the call closes.
+        assert!(
+            body.contains("response.function_call_arguments.delta"),
+            "missing function_call_arguments.delta in: {body}"
+        );
+        assert!(
+            body.contains("poet"),
+            "delta stream must carry task_name 'poet': {body}"
+        );
+        // Two fragments -> two delta events. Count `event:` lines since each
+        // event's type also echoes inside its JSON `type` field.
+        let delta_count = body
+            .matches("event: response.function_call_arguments.delta")
+            .count();
+        assert_eq!(delta_count, 2, "expected 2 delta events, got {delta_count}");
+
+        assert!(
+            body.contains("response.function_call_arguments.done"),
+            "missing function_call_arguments.done in: {body}"
+        );
+        assert!(body.contains("response.output_item.done"));
+        assert!(body.contains("response.completed"));
+        // The call_id must be carried through on both delta and done events.
+        assert!(body.contains("call_7"));
     }
 }

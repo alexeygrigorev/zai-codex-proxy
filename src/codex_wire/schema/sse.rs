@@ -70,6 +70,50 @@ pub struct ResponseOutputTextDeltaData {
     pub delta: String,
 }
 
+/// Streaming delta for a function-call's `arguments` JSON fragment. Codex
+/// incrementally parses these deltas to surface tool-call fields (for example
+/// a `spawn_agent` `task_name`) before the call completes, which is what the
+/// "Waiting for agents" panel relies on.
+#[derive(Clone, Debug, Serialize)]
+pub struct FunctionCallArgumentsDeltaData {
+    pub response_id: String,
+    pub item_id: String,
+    pub output_index: i64,
+    pub call_id: String,
+    pub delta: String,
+}
+
+/// Terminal payload for a function-call's accumulated `arguments`.
+#[derive(Clone, Debug, Serialize)]
+pub struct FunctionCallArgumentsDoneData {
+    pub response_id: String,
+    pub item_id: String,
+    pub output_index: i64,
+    pub call_id: String,
+    pub arguments: String,
+}
+
+/// Streaming delta for a custom tool call's freeform `input` payload
+/// (e.g. `apply_patch`). Codex applies these incrementally like a native tool.
+#[derive(Clone, Debug, Serialize)]
+pub struct CustomToolCallInputDeltaData {
+    pub response_id: String,
+    pub item_id: String,
+    pub output_index: i64,
+    pub call_id: String,
+    pub input_delta: String,
+}
+
+/// Terminal payload for a custom tool call's accumulated freeform `input`.
+#[derive(Clone, Debug, Serialize)]
+pub struct CustomToolCallInputDoneData {
+    pub response_id: String,
+    pub item_id: String,
+    pub output_index: i64,
+    pub call_id: String,
+    pub input: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ModelsEtagData {
     pub etag: &'static str,
