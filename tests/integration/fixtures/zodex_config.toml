@@ -1,0 +1,12 @@
+# Minimal isolated zodex profile used by tests/integration/test_zodex_cli.py.
+
+model = "glm-5-turbo"
+model_provider = "codex-proxy"
+disable_response_storage = true
+suppress_unstable_features_warning = true
+
+[model_providers.codex-proxy]
+name = "Z.AI via local codex-proxy"
+base_url = "http://127.0.0.1:{port}/v1"
+wire_api = "responses"
+requires_openai_auth = false

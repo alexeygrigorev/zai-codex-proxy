@@ -1,0 +1,157 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Test
+        run: cargo test --workspace --all-targets --verbose
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: test
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: linux-amd64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: zai-codex-proxy
+            asset_name: zai-codex-proxy-linux-amd64
+            use_cross: false
+
+          - name: linux-arm64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            binary: zai-codex-proxy
+            asset_name: zai-codex-proxy-linux-arm64
+            use_cross: true
+            skip_verify: true
+
+          - name: darwin-amd64
+            os: macos-latest
+            target: x86_64-apple-darwin
+            binary: zai-codex-proxy
+            asset_name: zai-codex-proxy-darwin-amd64
+            use_cross: false
+            skip_verify: true
+
+          - name: darwin-arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            binary: zai-codex-proxy
+            asset_name: zai-codex-proxy-darwin-arm64
+            use_cross: false
+
+          - name: windows-amd64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: zai-codex-proxy.exe
+            asset_name: zai-codex-proxy-windows-amd64.exe
+            use_cross: false
+
+          - name: windows-arm64
+            os: windows-latest
+            target: aarch64-pc-windows-msvc
+            binary: zai-codex-proxy.exe
+            asset_name: zai-codex-proxy-windows-arm64.exe
+            use_cross: false
+            skip_verify: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build release binary (cross)
+        if: matrix.use_cross
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Build release binary (cargo)
+        if: "!matrix.use_cross"
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Verify binary runs --version
+        if: ${{ !matrix.use_cross && !matrix.skip_verify }}
+        shell: bash
+        run: ./target/${{ matrix.target }}/release/${{ matrix.binary }} --version
+
+      - name: Rename binary
+        shell: bash
+        run: cp ./target/${{ matrix.target }}/release/${{ matrix.binary }} ./${{ matrix.asset_name }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ./${{ matrix.asset_name }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/zai-codex-proxy-linux-amd64/zai-codex-proxy-linux-amd64
+            artifacts/zai-codex-proxy-linux-arm64/zai-codex-proxy-linux-arm64
+            artifacts/zai-codex-proxy-darwin-amd64/zai-codex-proxy-darwin-amd64
+            artifacts/zai-codex-proxy-darwin-arm64/zai-codex-proxy-darwin-arm64
+            artifacts/zai-codex-proxy-windows-amd64.exe/zai-codex-proxy-windows-amd64.exe
+            artifacts/zai-codex-proxy-windows-arm64.exe/zai-codex-proxy-windows-arm64.exe

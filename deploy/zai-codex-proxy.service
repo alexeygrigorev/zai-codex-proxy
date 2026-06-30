@@ -1,0 +1,33 @@
+# systemd user service for zai-codex-proxy.
+#
+# Install as a *user* unit (runs under your user, reads ~/.zodex):
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/zai-codex-proxy.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now zai-codex-proxy
+#   loginctl enable-linger "$USER"        # start at boot / survive logout
+#
+# `%h` expands to the installing user's home directory, so this file is portable
+# as-is. Tail logs with: journalctl --user -u zai-codex-proxy -f
+#
+# Prerequisites (already in place for an existing zodex install):
+#   - binary:   ~/.zodex/bin/zai-codex-proxy
+#   - config:   ~/.zodex/codex-proxy/config.json
+#   - env file: ~/.zodex/zai.env exporting ZAI_API_KEY
+
+[Unit]
+Description=Z.AI Codex proxy (zodex)
+Documentation=https://github.com/alexeygrigorev/zai-codex-proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Loads ZAI_API_KEY; the binary falls back to it from CODEX_PROXY_ZAI_API_KEY.
+EnvironmentFile=%h/.zodex/zai.env
+ExecStart=%h/.zodex/bin/zai-codex-proxy --config %h/.zodex/codex-proxy/config.json
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

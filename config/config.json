@@ -1,0 +1,75 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8765,
+    "log_level": "DEBUG"
+  },
+  "zai": {
+    "api_url": "https://api.z.ai/api/coding/paas/v4/chat/completions",
+    "endpoints": {},
+    "allow_authorization_passthrough": false,
+    "models": []
+  },
+  "models": {
+    "served": []
+  },
+  "routing": {
+    "model_routes": {
+      "*": [
+        "glm-5.2"
+      ]
+    }
+  },
+  "health": {
+    "auth_failure_immediate_unhealthy": true,
+    "failure_threshold": 3,
+    "cooldown_seconds": 30
+  },
+  "accounts": [],
+  "access": {
+    "require_key": false,
+    "keys": []
+  },
+  "reasoning": {
+    "effort_levels": {
+      "none": {
+        "budget": 0,
+        "level": "LOW"
+      },
+      "minimal": {
+        "budget": 2048,
+        "level": "LOW"
+      },
+      "low": {
+        "budget": 4096,
+        "level": "LOW"
+      },
+      "medium": {
+        "budget": 16384,
+        "level": "MEDIUM"
+      },
+      "high": {
+        "budget": 32768,
+        "level": "HIGH"
+      },
+      "xhigh": {
+        "budget": 65536,
+        "level": "HIGH"
+      }
+    },
+    "default_effort": "medium"
+  },
+  "timeouts": {
+    "connect_seconds": 10,
+    "read_seconds": 600
+  },
+  "auto_compaction": {
+    "enabled": true,
+    "max_attempts_per_request": 1,
+    "tail_items_to_keep": 8
+  },
+  "compaction": {
+    "temperature": 0.1,
+    "preferred_targets": []
+  }
+}

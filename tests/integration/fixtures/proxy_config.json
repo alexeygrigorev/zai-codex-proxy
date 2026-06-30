@@ -1,0 +1,69 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": {port},
+    "log_level": "INFO"
+  },
+  "zai": {
+    "api_url": "https://api.z.ai/api/coding/paas/v4/chat/completions",
+    "models": ["glm-5.2", "glm-5-turbo"]
+  },
+  "models": {
+    "served": ["glm-5.2", "glm-5-turbo"]
+  },
+  "routing": {
+    "model_routes": {
+      "*": ["proxy:glm-5-turbo"],
+      "glm-5-turbo": [
+        {
+          "type": "physical",
+          "model": "glm-5-turbo",
+          "reasoning": { "effort": "none" }
+        }
+      ],
+      "glm-5.2": [
+        {
+          "type": "physical",
+          "model": "glm-5.2",
+          "reasoning": { "effort": "medium" }
+        }
+      ]
+    }
+  },
+  "health": {
+    "auth_failure_immediate_unhealthy": true,
+    "failure_threshold": 3,
+    "cooldown_seconds": 30
+  },
+  "access": {
+    "require_key": false,
+    "keys": []
+  },
+  "auto_compaction": {
+    "enabled": false,
+    "max_attempts_per_request": 0,
+    "tail_items_to_keep": 8
+  },
+  "reasoning": {
+    "default_effort": "none",
+    "effort_levels": {
+      "none": { "budget": 0, "level": "LOW" },
+      "medium": { "budget": 16384, "level": "MEDIUM" }
+    }
+  },
+  "timeouts": {
+    "connect_seconds": 10,
+    "read_seconds": 120
+  },
+  "compaction": {
+    "temperature": 0.1,
+    "preferred_targets": []
+  },
+  "retry": {
+    "enabled": true,
+    "max_attempts": 3,
+    "initial_delay_ms": 1000,
+    "max_delay_ms": 5000,
+    "backoff_multiplier": 2.0
+  }
+}
