@@ -360,6 +360,45 @@ impl AccountPool {
             .collect()
     }
 
+    pub fn availability_diagnostic_for_models<'a, I>(
+        &self,
+        models: I,
+    ) -> AccountAvailabilityDiagnostic
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let models: Vec<&str> = models.into_iter().collect();
+        let guard = self.accounts.read();
+        let mut diagnostic = AccountAvailabilityDiagnostic::default();
+
+        for (account, state) in guard.iter() {
+            if !models.iter().any(|model| account.supports_model(model)) {
+                continue;
+            }
+
+            diagnostic.compatible_account_count += 1;
+            let state = state.read();
+            if state.alive {
+                diagnostic.healthy_account_count += 1;
+                continue;
+            }
+
+            diagnostic.unhealthy_account_count += 1;
+            if let Some(error) = &state.last_error {
+                diagnostic
+                    .last_error
+                    .get_or_insert_with(|| error.to_string());
+                if is_usage_limit_error_message(error) {
+                    diagnostic
+                        .usage_limited_error
+                        .get_or_insert_with(|| error.to_string());
+                }
+            }
+        }
+
+        diagnostic
+    }
+
     pub fn account_count(&self) -> usize {
         self.accounts.read().len()
     }
@@ -380,6 +419,15 @@ pub struct AccountSnapshot {
     pub unhealthy_until: Option<SystemTime>,
     pub recovery_probe_due: bool,
     pub probe_in_progress: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AccountAvailabilityDiagnostic {
+    pub compatible_account_count: usize,
+    pub healthy_account_count: usize,
+    pub unhealthy_account_count: usize,
+    pub last_error: Option<String>,
+    pub usage_limited_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -416,6 +464,16 @@ fn sanitize_error_for_log(message: &str) -> String {
     let mut out = message.replace('\n', "\\n").replace('\r', "\\r");
     out.truncate(1024);
     out
+}
+
+fn is_usage_limit_error_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("429")
+        || lower.contains("too many requests")
+        || lower.contains("rate limit")
+        || lower.contains("usage limit")
+        || lower.contains("limit exhausted")
+        || lower.contains("quota")
 }
 
 fn mask_auth(auth: &AccountAuth) -> MaskedAccountAuth {

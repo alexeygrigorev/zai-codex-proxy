@@ -2,6 +2,7 @@ use super::pool::AccountPool;
 use crate::codex_wire::schema::responses_wire::{ChatContent, ChatMessage};
 use crate::config::{EffectiveReasoningConfig, RouteTargetConfig};
 use crate::error::{ProviderError, ProxyError};
+use axum::http::StatusCode;
 use parking_lot::RwLock;
 use std::cmp::Reverse;
 use std::collections::HashMap;
@@ -231,12 +232,7 @@ impl Router {
         cache_key_override: Option<u64>,
     ) -> Result<ResolvedRoute, ProxyError> {
         let decision = Self::route(pool, state, candidates, messages, cache_key_override)
-            .ok_or_else(|| {
-                ProxyError::Provider(ProviderError::new(
-                    None,
-                    "No compatible healthy accounts available for any preferred target",
-                ))
-            })?;
+            .ok_or_else(|| unavailable_route_error(pool, candidates))?;
         let candidate = candidates
             .iter()
             .find(|candidate| candidate.priority_index == decision.preferred_target_index)
@@ -264,6 +260,36 @@ impl Router {
             reasoning: candidate.reasoning.clone(),
         })
     }
+}
+
+fn unavailable_route_error(pool: &AccountPool, candidates: &[RouteCandidate]) -> ProxyError {
+    let diagnostic = pool
+        .availability_diagnostic_for_models(candidates.iter().map(|c| c.upstream_model.as_str()));
+
+    if diagnostic.compatible_account_count > 0 && diagnostic.healthy_account_count == 0 {
+        if let Some(error) = diagnostic.usage_limited_error {
+            return ProxyError::Provider(ProviderError::new(
+                Some(StatusCode::TOO_MANY_REQUESTS),
+                format!(
+                    "All compatible Z.AI accounts are unavailable because upstream usage or rate limits were hit. Last upstream error: {error}"
+                ),
+            ));
+        }
+
+        if let Some(error) = diagnostic.last_error {
+            return ProxyError::Provider(ProviderError::new(
+                None,
+                format!(
+                    "No compatible healthy accounts available for any preferred target. Last account error: {error}"
+                ),
+            ));
+        }
+    }
+
+    ProxyError::Provider(ProviderError::new(
+        None,
+        "No compatible healthy accounts available for any preferred target",
+    ))
 }
 
 #[cfg(test)]
@@ -387,5 +413,30 @@ mod tests {
         assert!(second.cache_hit);
         assert_eq!(second.cache_key, 42);
         assert_eq!(second.account_index, first.account_index);
+    }
+
+    #[test]
+    fn propagates_usage_limit_when_all_compatible_accounts_are_rate_limited() {
+        let pool = AccountPool::new();
+        pool.load_accounts(vec![account("zai", Some(vec!["glm-4.6"]), 1)]);
+        pool.mark_rate_limited(
+            0,
+            None,
+            Some(
+                "provider_error (429): Weekly/Monthly Limit Exhausted. Your limit will reset later",
+            ),
+        );
+        let state = RoutingState::new();
+
+        let err =
+            Router::resolve_route(&pool, &state, &[candidate(0, "glm-4.6")], &messages(), None)
+                .unwrap_err();
+
+        assert_eq!(err.status_code(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            err.to_string()
+                .contains("upstream usage or rate limits were hit")
+        );
+        assert!(err.to_string().contains("Weekly/Monthly Limit Exhausted"));
     }
 }
